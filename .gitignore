@@ -1,5 +1,4 @@
 .venv
-.streamlit
 _pycache
 test_endpoints.py
 test.py
