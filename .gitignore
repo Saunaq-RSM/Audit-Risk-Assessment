@@ -5,3 +5,5 @@ test_endpoints.py
 test.py
 questions_with_answers.xlsx
 documents
+script.py
+script_backup.py

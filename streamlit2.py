@@ -17,12 +17,14 @@ import re
 import requests
 import tiktoken
 from typing import Dict, List, Tuple
+import time
+st.write(st.secrets)
 
 # -- Configuration from secrets --
 LLM_ENDPOINT = st.secrets["AZURE_API_ENDPOINT"]
 LLM_API_KEY = st.secrets["AZURE_API_KEY"]
 EMBED_ENDPOINT = st.secrets["EMBEDDING_ENDPOINT"]
-EMBED_API_KEY  = st.secrets["AZURE_API_KEY"]
+EMBED_API_KEY  = LLM_API_KEY
 
 ENC = tiktoken.get_encoding("cl100k_base")
 
@@ -111,6 +113,7 @@ def get_llm_response(prompt: str, context: str) -> str:
     ]
     r = requests.post(LLM_ENDPOINT, headers=headers, json={"messages":messages})
     r.raise_for_status()
+    time.sleep(2)
     return r.json()["choices"][0]["message"]["content"].strip()
 
 # --- Run pipeline ---
