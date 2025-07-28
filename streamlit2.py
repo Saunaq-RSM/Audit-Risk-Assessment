@@ -18,7 +18,7 @@ import requests
 import tiktoken
 from typing import Dict, List, Tuple
 import time
-st.write(st.secrets)
+print(st.secrets)
 
 # -- Configuration from secrets --
 LLM_ENDPOINT = st.secrets["AZURE_API_ENDPOINT"]
