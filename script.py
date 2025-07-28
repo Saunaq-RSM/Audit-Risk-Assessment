@@ -18,12 +18,12 @@ LLM_ENDPOINT = (
     "https://ai-sieffersprojecthub149512100299.openai.azure.com/"
     "openai/deployments/RSMNL-ICS-TP-Functional-Analysis-o4-mini/chat/completions?api-version=2025-01-01-preview"
 )
-LLM_API_KEY = "ACMAvytOGdUVjjqbAepgJa1QsirxDkHnTbB2p2syPDPls580uF8uJQQJ99BFACfhMk5XJ3w3AAAAACOGOQ4Z"
+LLM_API_KEY = ""
 EMBED_ENDPOINT = (
     "https://ai-sieffersprojecthub149512100299.openai.azure.com/"
     "openai/deployments/text-embedding-ada-002-test/embeddings?api-version=2023-05-15"
 )
-EMBED_API_KEY = "ACMAvytOGdUVjjqbAepgJa1QsirxDkHnTbB2p2syPDPls580uF8uJQQJ99BFACfhMk5XJ3w3AAAAACOGOQ4Z"
+EMBED_API_KEY = ""
 
 # --- Tokenizer ---
 ENC = tiktoken.get_encoding("cl100k_base")
