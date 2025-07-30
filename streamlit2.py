@@ -156,13 +156,12 @@ if run_button:
             ctx = "PUBLIC CONTEXT:\n" + "\n".join(f"[{s}] {t}" for s,t in hits_pub)
             ctx += "\n\nCLIENT CONTEXT:\n" + "\n".join(f"[{s}] {t}" for s,t in hits_cli)
             ctx += "\n\nIf there is something in the question that is not in the context, the search the internet."
-
             ctx += f"\n\nFORMAT EXAMPLE:\n{example}"
             ctx+= "DO NOT RESPOND WITH MARKDOWN FORMATTING"
             ans = get_llm_response(prompt, ctx)
             df1.at[i,'Generated answer'] = ans
-            df1.at[i,'Public chunks'] = " | ".join(t for _,t in hits_pub)
-            df1.at[i,'Client chunks'] = " | ".join(t for _,t in hits_cli)
+            # df1.at[i,'Public chunks'] = " | ".join(t for _,t in hits_pub)
+            # df1.at[i,'Client chunks'] = " | ".join(t for _,t in hits_cli)
             pb.progress((i+1)/total)
             pt.text(f"Answered {i+1} of {total} questions")
 
@@ -212,7 +211,7 @@ if run_button:
             for c,val in enumerate(row_vals, start=1):
                 ws1.cell(row=r,column=c).value = val
         # Write sheet2
-        ws2 = wb['English overview']
+        ws2 = wb['Overview of risks']
         for row in ws2.iter_rows(min_row=2, max_row=ws2.max_row, max_col=len(df2.columns)):
             for cell in row: cell.value=None
         for r,row_vals in enumerate(df2.values, start=2):
