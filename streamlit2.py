@@ -18,6 +18,7 @@ import requests
 import tiktoken
 from typing import Dict, List, Tuple
 import time
+import math
 print(st.secrets)
 
 # -- Configuration from secrets --
@@ -127,13 +128,19 @@ if run_button:
         pub_idx, pub_meta, pub_chunks = index_documents(pub_docs, chunk_size, chunk_overlap)
         cli_idx, cli_meta, cli_chunks = index_documents(cli_docs, chunk_size, chunk_overlap)
 
-        df = pd.read_excel(excel_file)
+        excel_bytes = excel_file.read()
+        df = pd.read_excel(io.BytesIO(excel_bytes))
         df[['Generated answer','Public chunks','Client chunks']] = ""
 
         progress = st.progress(0)
         total = len(df)
         results = []
         for i, row in df.iterrows():
+            number = row["#"]
+            print(number)
+            if math.isnan(number):
+                print("skipped")
+                continue
             q = row['Question']
             example = row['Best practice answer']
             pub_hits = retrieve_chunks(q, pub_idx, pub_meta, pub_chunks, top_k)
@@ -154,9 +161,31 @@ if run_button:
         st.success("Done! Here are the answers:")
         st.dataframe(df)
 
-        buf = io.BytesIO()
-        df.to_excel(buf, index=False)
-        buf.seek(0)
-        st.download_button("Download results as Excel", data=buf,
-                           file_name="questions_with_answers.xlsx",
-                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        # save into the original workbook to preserve other sheets/formatting
+        import openpyxl
+        # load workbook from uploaded bytes
+        wb = openpyxl.load_workbook(io.BytesIO(excel_bytes))
+        # target first sheet
+        sheet_name = wb.sheetnames[0]
+        ws = wb[sheet_name]
+        # clear existing rows except header
+        for row in ws.iter_rows(min_row=2, max_row=ws.max_row):
+            for cell in row:
+                cell.value = None
+        # write header row
+        for col_idx, col_name in enumerate(df.columns, start=1):
+            ws.cell(row=1, column=col_idx, value=col_name)
+        # write dataframe rows
+        for row_idx, row_data in enumerate(df.values, start=2):
+            for col_idx, value in enumerate(row_data, start=1):
+                ws.cell(row=row_idx, column=col_idx, value=value)
+        # output modified workbook
+        output = io.BytesIO()
+        wb.save(output)
+        output.seek(0)
+        st.download_button(
+            "Download results as Excel",
+            data=output,
+            file_name="questions_with_answers.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
