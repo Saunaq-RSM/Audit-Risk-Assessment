@@ -20,7 +20,7 @@ from typing import Dict, List, Tuple
 import time
 import math
 print(st.secrets)
-
+print("monkey")
 # -- Configuration from secrets --
 LLM_ENDPOINT = st.secrets["AZURE_API_ENDPOINT"]
 LLM_API_KEY = st.secrets["AZURE_API_KEY"]
