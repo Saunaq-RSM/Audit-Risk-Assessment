@@ -19,6 +19,9 @@ import tiktoken
 from typing import Dict, List, Tuple
 import time
 import math
+import openpyxl
+from io import BytesIO
+
 print(st.secrets)
 print("monkey")
 # -- Configuration from secrets --
@@ -114,7 +117,7 @@ def get_llm_response(prompt: str, context: str) -> str:
     ]
     r = requests.post(LLM_ENDPOINT, headers=headers, json={"messages":messages})
     r.raise_for_status()
-    time.sleep(2)
+    time.sleep(3)
     return r.json()["choices"][0]["message"]["content"].strip()
 
 # --- Run pipeline ---
@@ -128,64 +131,98 @@ if run_button:
         pub_idx, pub_meta, pub_chunks = index_documents(pub_docs, chunk_size, chunk_overlap)
         cli_idx, cli_meta, cli_chunks = index_documents(cli_docs, chunk_size, chunk_overlap)
 
-        excel_bytes = excel_file.read()
-        df = pd.read_excel(io.BytesIO(excel_bytes))
-        df[['Generated answer','Public chunks','Client chunks']] = ""
-
-        progress = st.progress(0)
-        total = len(df)
-        results = []
-        for i, row in df.iterrows():
+        original_bytes = excel_file.read()
+        # Phase 1: process first sheet
+        df1 = pd.read_excel(BytesIO(original_bytes), sheet_name=0)
+        df1[['Generated answer','Public chunks','Client chunks']] = ""
+        # Prepare docs
+        pub_docs = {f.name: load_main_body(f) for f in public_files}
+        cli_docs = {f.name: load_main_body(f) for f in client_files}
+        pub_idx, pub_meta, pub_chunks = index_documents(pub_docs, chunk_size, chunk_overlap)
+        cli_idx, cli_meta, cli_chunks = index_documents(cli_docs, chunk_size, chunk_overlap)
+        # Progress bar
+        total = len(df1)
+        pb = st.progress(0)
+        pt = st.empty()
+        for i,row in df1.iterrows():
             number = row["#"]
-            print(number)
             if math.isnan(number):
                 print("skipped")
                 continue
-            q = row['Question']
+            prompt = row['Question']
             example = row['Best practice answer']
-            pub_hits = retrieve_chunks(q, pub_idx, pub_meta, pub_chunks, top_k)
-            cli_hits = retrieve_chunks(q, cli_idx, cli_meta, cli_chunks, top_k)
+            hits_pub = retrieve_chunks(prompt, pub_idx, pub_meta, pub_chunks, top_k)
+            hits_cli = retrieve_chunks(prompt, cli_idx, cli_meta, cli_chunks, top_k)
+            ctx = "PUBLIC CONTEXT:\n" + "\n".join(f"[{s}] {t}" for s,t in hits_pub)
+            ctx += "\n\nCLIENT CONTEXT:\n" + "\n".join(f"[{s}] {t}" for s,t in hits_cli)
+            ctx += "\n\nIf there is something in the question that is not in the context, the search the internet."
 
-            ctx = "PUBLIC CONTEXT:\n" + "\n".join(f"[{src}] {txt}" for src,txt in pub_hits)
-            ctx += "\n\nCLIENT CONTEXT:\n" + "\n".join(f"[{src}] {txt}" for src,txt in cli_hits)
-            ctx += f"\n\nUSE THE FOLLOWING TEXT AS EXAMPLE FOR FORMATTING (DO NOT EXCEED LEN):\n{example}"
-
-            ans = get_llm_response(prompt=q, context=ctx)
-            df.at[i,'Generated answer'] = ans
-            df.at[i,'Public chunks']    = " | ".join(txt for _,txt in pub_hits)
-            df.at[i,'Client chunks']    = " | ".join(txt for _,txt in cli_hits)
-
-            progress.progress((i+1)/total)
+            ctx += f"\n\nFORMAT EXAMPLE:\n{example}"
+            ctx+= "DO NOT RESPOND WITH MARKDOWN FORMATTING"
+            ans = get_llm_response(prompt, ctx)
+            df1.at[i,'Generated answer'] = ans
+            df1.at[i,'Public chunks'] = " | ".join(t for _,t in hits_pub)
+            df1.at[i,'Client chunks'] = " | ".join(t for _,t in hits_cli)
+            pb.progress((i+1)/total)
+            pt.text(f"Answered {i+1} of {total} questions")
 
         # show results
-        st.success("Done! Here are the answers:")
-        st.dataframe(df)
-
-        # save into the original workbook to preserve other sheets/formatting
-        import openpyxl
-        # load workbook from uploaded bytes
-        wb = openpyxl.load_workbook(io.BytesIO(excel_bytes))
-        # target first sheet
-        sheet_name = wb.sheetnames[0]
-        ws = wb[sheet_name]
-        # clear existing rows except header
-        for row in ws.iter_rows(min_row=2, max_row=ws.max_row):
-            for cell in row:
-                cell.value = None
-        # write header row
-        for col_idx, col_name in enumerate(df.columns, start=1):
-            ws.cell(row=1, column=col_idx, value=col_name)
-        # write dataframe rows
-        for row_idx, row_data in enumerate(df.values, start=2):
-            for col_idx, value in enumerate(row_data, start=1):
-                ws.cell(row=row_idx, column=col_idx, value=value)
-        # output modified workbook
-        output = io.BytesIO()
-        wb.save(output)
-        output.seek(0)
-        st.download_button(
-            "Download results as Excel",
-            data=output,
-            file_name="questions_with_answers.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
+        df2 = pd.read_excel(BytesIO(original_bytes), sheet_name='English overview')
+        # Initialize columns if missing
+        cols = ['Fraud Risk Factor?','Internal Controls','Likelihood','Likelihood Explanation',
+                'Material Quantitative Impact?','Impact Explanation','Conclusion','SR?']
+        prompts = {'Fraud Risk Factor?': "The Fraud Risk Factor of the above risk type. Answer ONLY with Yes or No.",
+                   'Internal Controls': "What are the internal controls within the company against this type of risk. Answer with a maximum of 10 words.",
+                   'Likelihood': "Based on public and previous sources. What is the likelihood of this type of risk occuring. Answer ONLY with High or Low.",
+                   'Likelihood Explanation': "Based on public and previous sources. What is the likelihood of this type of risk being relevant. Only include your justification, not the answer. Answer with a MAXIMUM of 15 words.",
+                    'Material Quantitative Impact?': "Based on public and previous sources. What is the estimated impact of this type of risk. Answer ONLY with High or Low.",
+                   'Impact Explanation': "Based on public and previous sources. What is the estimated impact of this type of risk. Only include your justification, not the answer. Answer with a MAXIMUM of 15 words.",
+                   'Conclusion': "Having high likelihood of this type of risk and a high material impact, means there is significant risk. Explain if there is significant risk or not, and if there isn't, but further discussion with the client is needed. Answer with a maximum of 10-15 words.",
+                   "SR?": "Having high likelihood of this type of risk and a high material impact, means there is significant risk. Answer if there is significant risk or not. Answer only with 'SR' or 'No SR'"}
+        for c in cols:
+            if c not in df2.columns:
+                df2[c] = ""
+        for idx,row in df2.iterrows():
+            irf = row['Inherent Risk Factor']
+            # build prompt for translation
+            for j,c in enumerate(cols):
+                base_prompt = f"For the risk type '{irf}', answer the following question: " + prompts[c]
+                hits_pub = retrieve_chunks(base_prompt, pub_idx, pub_meta, pub_chunks, top_k)
+                hits_cli = retrieve_chunks(base_prompt, cli_idx, cli_meta, cli_chunks, top_k)
+                ctx = "PUBLIC CONTEXT:\n" + "\n".join(f"[{s}] {t}" for s,t in hits_pub)
+                ctx += "\n\nCLIENT CONTEXT:\n" + "\n".join(f"[{s}] {t}" for s,t in hits_cli)
+                ctx += "If there is something in the question that is not in the context, the search the internet."
+                ctx+= "DO NOT RESPOND WITH MARKDOWN FORMATTING"
+                tr_ctx = "You are a world-class corporate analysis assistant for an expert audit team investigating the possibility of fraud. Use the following context about a particular company to help answer the prompts: "+ ctx  # reuse or customize context
+                tr_ans = get_llm_response(base_prompt, tr_ctx)
+                df2.at[idx, c] = tr_ans
+                print(tr_ans)
+            # Expect LLM returns JSON-like or delimited; naive split by commas
+            # parts = [p.strip() for p in tr_ans.split(';')]
+            # for j,c in enumerate(cols):
+            #     if j < len(parts):
+            #         df2.at[idx,c] = parts[j]
+        # Write back both sheets, preserving others
+        wb = openpyxl.load_workbook(BytesIO(original_bytes))
+        # Write sheet1
+        ws1 = wb[wb.sheetnames[0]]
+        for row in ws1.iter_rows(min_row=2, max_row=ws1.max_row, max_col=len(df1.columns)):
+            for cell in row: cell.value=None
+        for r,row_vals in enumerate(df1.values, start=2):
+            for c,val in enumerate(row_vals, start=1):
+                ws1.cell(row=r,column=c).value = val
+        # Write sheet2
+        ws2 = wb['English overview']
+        for row in ws2.iter_rows(min_row=2, max_row=ws2.max_row, max_col=len(df2.columns)):
+            for cell in row: cell.value=None
+        for r,row_vals in enumerate(df2.values, start=2):
+            for c,val in enumerate(row_vals, start=1):
+                ws2.cell(row=r,column=c).value = val
+        # Output
+        out = BytesIO()
+        wb.save(out)
+        out.seek(0)
+        st.success("All done!")
+        st.download_button("Download workbook with answers", data=out,
+            file_name="questions_with_translations.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
