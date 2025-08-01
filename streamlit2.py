@@ -110,6 +110,7 @@ def get_llm_response(prompt: str, context: str) -> str:
     headers = {"Content-Type":"application/json","api-key":LLM_API_KEY}
     messages=[
         {"role":"system","content":(
+            "Please respond in natural, flowing English paragraphs. Do not use any markdown syntax (no “-”, “*”, “1.”) or bullet/list formatting—just plain text."
             "You are a world-class corporate analysis assistant for an expert audit team."
             " Use the context to answer due diligence questions.\n"+context
         )},
@@ -156,7 +157,7 @@ if run_button:
             ctx = "PUBLIC CONTEXT:\n" + "\n".join(f"[{s}] {t}" for s,t in hits_pub)
             ctx += "\n\nCLIENT CONTEXT:\n" + "\n".join(f"[{s}] {t}" for s,t in hits_cli)
             ctx += "\n\nIf there is something in the question that is not in the context, the search the internet."
-            ctx += f"\n\nFORMAT EXAMPLE:\n{example}"
+            ctx += f"\n\nFORMAT EXAMPLE:\n Q: {prompt}\n A: {example}"
             ctx+= "DO NOT RESPOND WITH MARKDOWN FORMATTING"
             ans = get_llm_response(prompt, ctx)
             df1.at[i,'Generated answer'] = ans
