@@ -49,6 +49,20 @@ with st.sidebar:
 public_files = st.file_uploader("Public PDFs", type="pdf", accept_multiple_files=True, key="pubs")
 client_files = st.file_uploader("Client PDFs", type="pdf", accept_multiple_files=True, key="clients")
 excel_file   = st.file_uploader("Input GPT Excel", type="xlsx", key="excel")
+if excel_file and 'excel_bytes' not in st.session_state:
+    st.session_state.excel_bytes = excel_file.read()
+
+sheet1_name = sheet2_name = None
+if 'excel_bytes' in st.session_state:
+    wb = openpyxl.load_workbook(BytesIO(st.session_state.excel_bytes), read_only=True)
+    sheet_names = wb.sheetnames
+    wb.close()
+    st.write("**Step 1:** Select sheets from the workbook:")
+    sheet1_name = st.selectbox("Sheet for Code 1300 questions", sheet_names, key="sheet1")
+    sheet2_name = st.selectbox("Sheet for Overview of Risks", sheet_names, key="sheet2")
+    if sheet1_name == sheet2_name:
+        st.error("Please select two different sheets.")
+        sheet2_name = None
 
 run_button = st.button("Run Retrieval & Generate Answers")
 
@@ -126,13 +140,20 @@ def get_llm_response(prompt: str, context: str) -> str:
 if run_button:
     if not excel_file:
         st.error("Please upload the Input GPT.xlsx file.")
+    elif not sheet1_name or not sheet2_name:
+        st.error("Please select two distinct sheets before running.")
     else:
-        # Read the Excel bytes once
-        original_bytes = excel_file.read()
+        # read bytes again (necessary because we read once above)
+        original_bytes = st.session_state.excel_bytes
+        df1 = pd.read_excel(BytesIO(original_bytes), sheet_name=sheet1_name)
+        df2 = pd.read_excel(BytesIO(original_bytes), sheet_name=sheet2_name)
 
-        # Load both sheets up front
-        df1 = pd.read_excel(BytesIO(original_bytes), sheet_name=0)
-        df2 = pd.read_excel(BytesIO(original_bytes), sheet_name='English overview')
+
+        # Proceed with pipeline using df1 and df2...
+        # rest of code unchanged, but replace hardcoded sheet references
+        # e.g., use df1, df2 and write back using ws1 = wb[sheet1_name], ws2 = wb[sheet2_name]
+
+        st.success("Sheets loaded: {} and {}".format(sheet1_name, sheet2_name))
 
         # Prepare the second‐sheet columns
         cols = ['Fraud Risk Factor?','Internal Controls','Likelihood','Likelihood Explanation',
@@ -193,14 +214,11 @@ if run_button:
                 base_prompt = f"For the risk type '{irf}', answer: {prompts[c]}"
                 hits_pub = retrieve_chunks(base_prompt, pub_idx, pub_meta, pub_chunks, top_k)
                 hits_cli = retrieve_chunks(base_prompt, cli_idx, cli_meta, cli_chunks, top_k)
-
                 ctx = "PUBLIC CONTEXT:\n" + "\n".join(f"[{s}] {t}" for s,t in hits_pub)
                 ctx += "\n\nCLIENT CONTEXT:\n" + "\n".join(f"[{s}] {t}" for s,t in hits_cli)
                 ctx += "\nDO NOT RESPOND WITH MARKDOWN"
-
                 tr_ans = get_llm_response(base_prompt, ctx)
                 df2.at[idx, c] = tr_ans
-
                 processed += 1
                 pb.progress(processed / total)
                 pt.text(f"Answered {processed} of {total} questions")
