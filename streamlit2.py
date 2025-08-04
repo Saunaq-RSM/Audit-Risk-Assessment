@@ -347,7 +347,7 @@ else:
                 ctx += "\n\nFORMAT EXAMPLE:\n Q: {prompt}\n A: {example}"
                 ctx += "\nDO NOT RESPOND WITH MARKDOWN"
 
-                ans = ""
+                ans = get_llm_response(prompt, ctx)
                 df1.at[i, 'Generated answer'] = ans
 
                 processed += 1
