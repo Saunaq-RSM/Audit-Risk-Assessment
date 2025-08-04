@@ -21,6 +21,53 @@ import time
 import math
 import openpyxl
 from io import BytesIO
+from pathlib import Path
+from openpyxl import load_workbook
+from pydantic import BaseModel, Field, model_validator, ValidationError
+import json
+
+class InherentRisk(BaseModel):
+    risk_type: str
+
+    Fraud_Risk_Factor: str = Field(
+        ..., 
+        pattern="^(Yes|No)$",
+        description="Answer must be exactly 'Yes' or 'No'"
+    )
+
+    Internal_Controls: str
+
+    Likelihood: str = Field(
+        ..., 
+        pattern="^(High|Low)$",
+        description="One of High, Medium, or Low"
+    )
+
+    Likelihood_Explanation: str
+
+    Material_Quantitative_Impact: str = Field(
+        ..., 
+        pattern="^(High|Low)$",
+        description="One of High or Low"
+    )
+
+    Impact_Explanation: str
+    Conclusion: str
+
+    SR: str = Field(
+        ..., 
+        pattern="^(SR|No SR)$",
+        description="Either 'SR' or 'No SR'"
+    )
+
+    @model_validator(mode="after")
+    def coerce_significant_risk(self):
+        # if both are High, force SR to "SR", otherwise force "No SR"
+        if self.Likelihood == "High" and self.Material_Quantitative_Impact == "High":
+            object.__setattr__(self, "SR", "SR")
+        else:
+            object.__setattr__(self, "SR", "No SR")
+        return self
 
 # -- Configuration from secrets --
 LLM_ENDPOINT = st.secrets["AZURE_API_ENDPOINT"]
@@ -37,6 +84,22 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
+
+# risks_json = [
+#   {
+#     "risk_type":           "string",           
+#     "Fraud Risk Factor?":  "Yes"|"No",
+#     "Internal Controls":   "string",         
+#     "Likelihood":          "High"|"Medium"|"Low",
+#     "Likelihood Explanation":"string",          
+#     "Material Quantitative Impact?":"High"|"Low",
+#     "Impact Explanation":  "string",           
+#     "Conclusion":          "string",           
+#     "SR?":                 "SR"|"No SR"
+#   }
+# ]
+
+
 st.title("RAG Audit Assistant 🌐🔍")
 st.write("Upload your public & client PDFs and the Input GPT.xlsx. Click **Run** to retrieve relevant chunks & generate answers.")
 
@@ -44,27 +107,26 @@ with st.sidebar:
     st.header("Settings")
     chunk_size    = st.number_input("Chunk size (words)",   min_value=50,   max_value=1000, value=200, step=50)
     chunk_overlap = st.number_input("Chunk overlap (words)",min_value=0,    max_value=chunk_size-1, value=50, step=10)
-    top_k         = st.number_input("Chunks per query (k)", min_value=1,    max_value=20,   value=5,   step=1)
+    top_k = st.number_input("Chunks per query (k)", min_value=1,    max_value=20,   value=5,   step=1)
 
 public_files = st.file_uploader("Public PDFs", type="pdf", accept_multiple_files=True, key="pubs")
 client_files = st.file_uploader("Client PDFs", type="pdf", accept_multiple_files=True, key="clients")
-excel_file   = st.file_uploader("Input GPT Excel", type="xlsx", key="excel")
-if excel_file and 'excel_bytes' not in st.session_state:
-    st.session_state.excel_bytes = excel_file.read()
+company_name  = st.text_input("Company Name")
+audit_year = st.text_input("Year for Audit")
 
-sheet1_name = sheet2_name = None
-if 'excel_bytes' in st.session_state:
-    wb = openpyxl.load_workbook(BytesIO(st.session_state.excel_bytes), read_only=True)
-    sheet_names = wb.sheetnames
-    wb.close()
-    st.write("**Step 1:** Select sheets from the workbook:")
-    sheet1_name = st.selectbox("Sheet for Code 1300 questions", sheet_names, key="sheet1")
-    sheet2_name = st.selectbox("Sheet for Overview of Risks", sheet_names, key="sheet2")
-    if sheet1_name == sheet2_name:
-        st.error("Please select two different sheets.")
-        sheet2_name = None
+excel_path = Path("Input GPT.xlsx")
+if excel_path.exists() and "excel_bytes" not in st.session_state:
+    st.session_state.excel_bytes = excel_path.read_bytes()
 
-run_button = st.button("Run Retrieval & Generate Answers")
+risks_template_path = Path("empty template.xlsx")
+if risks_template_path.exists() and "risk_excel_bytes" not in st.session_state:
+    st.session_state.risks_excel_bytes = risks_template_path.read_bytes()
+
+if "pipeline_ran" not in st.session_state:
+    st.session_state.pipeline_ran = False
+
+
+# run_button = st.button("Run Retrieval & Generate Answers")
 
 # --- Helper functions (unchanged) ---
 def clean_text(raw: str) -> str:
@@ -136,122 +198,271 @@ def get_llm_response(prompt: str, context: str) -> str:
     time.sleep(3)
     return r.json()["choices"][0]["message"]["content"].strip()
 
-# --- Run pipeline ---
-if run_button:
-    if not excel_file:
-        st.error("Please upload the Input GPT.xlsx file.")
-    elif not sheet1_name or not sheet2_name:
-        st.error("Please select two distinct sheets before running.")
-    else:
-        # read bytes again (necessary because we read once above)
-        original_bytes = st.session_state.excel_bytes
-        df1 = pd.read_excel(BytesIO(original_bytes), sheet_name=sheet1_name)
-        df2 = pd.read_excel(BytesIO(original_bytes), sheet_name=sheet2_name)
+def parse_risks_response(raw: str) -> List[InherentRisk]:
+    """
+    Given the LLM's JSON string, returns a list of validated InherentRisk objects.
+    Raises ValueError on malformed JSON or schema violations.
+    """
+    fence_pattern = re.compile(r"^```(?:json)?\s*(.*)\s*```$", re.DOTALL)
+    m = fence_pattern.match(raw.strip())
+    if m:
+        raw = m.group(1)
 
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Response was not valid JSON: {e}\n\nRaw text:\n{raw}")
 
-        # Proceed with pipeline using df1 and df2...
-        # rest of code unchanged, but replace hardcoded sheet references
-        # e.g., use df1, df2 and write back using ws1 = wb[sheet1_name], ws2 = wb[sheet2_name]
+    if not isinstance(data, list):
+        raise ValueError(f"Expected a JSON array, got {type(data)}")
 
-        st.success("Sheets loaded: {} and {}".format(sheet1_name, sheet2_name))
-
-        # Prepare the second‐sheet columns
-        cols = ['Fraud Risk Factor?','Internal Controls','Likelihood','Likelihood Explanation',
-                'Material Quantitative Impact?','Impact Explanation','Conclusion','SR?']
-        prompts = {
-            'Fraud Risk Factor?':       "The Fraud Risk Factor of the above risk type. Answer ONLY with Yes or No.",
-            'Internal Controls':        "What are the internal controls within the company against this type of risk. Answer with a maximum of 10 words.",
-            'Likelihood':               "Based on public and previous sources. What is the likelihood of this type of risk occurring. Answer ONLY with High or Low.",
-            'Likelihood Explanation':   "Based on public and previous sources. Only include justification, max 15 words.",
-            'Material Quantitative Impact?': "Based on public and previous sources. Estimated impact of this type of risk. Answer ONLY with High or Low.",
-            'Impact Explanation':       "Based on public and previous sources. Only include justification, max 15 words.",
-            'Conclusion':               "Explain if there is significant risk or if further discussion is needed. Max 10-15 words.",
-            'SR?':                      "Answer only with 'SR' or 'No SR'."
+    risks: List[InherentRisk] = []
+    for idx, item in enumerate(data):
+        # rename keys to be Pydantic-friendly
+        mapped = {
+            "risk_type":                  item.get("risk_type"),
+            "Fraud_Risk_Factor":          item.get("Fraud Risk Factor?"),
+            "Internal_Controls":          item.get("Internal Controls"),
+            "Likelihood":                 item.get("Likelihood"),
+            "Likelihood_Explanation":     item.get("Likelihood Explanation"),
+            "Material_Quantitative_Impact":item.get("Material Quantitative Impact?"),
+            "Impact_Explanation":         item.get("Impact Explanation"),
+            "Conclusion":                 item.get("Conclusion"),
+            "SR":                         item.get("SR?"),
         }
-        # Ensure those columns exist
-        for c in cols:
-            if c not in df2.columns:
-                df2[c] = ""
+        try:
+            risks.append(InherentRisk(**mapped))
+        except ValidationError as ve:
+            raise ValueError(f"Item {idx} failed validation:\n{ve}")
 
-        # Calculate total number of LLM calls (sheet1 rows + sheet2 rows * number of prompts)
-        total = len(df1) + len(df2) * len(cols)
-        pb = st.progress(0.0)
-        pt = st.empty()
-        processed = 0
+    return risks
 
-        # Prepare and index all docs once
-        pub_docs = {f.name: load_main_body(f) for f in public_files}
-        cli_docs = {f.name: load_main_body(f) for f in client_files}
-        pub_idx, pub_meta, pub_chunks = index_documents(pub_docs, chunk_size, chunk_overlap)
-        cli_idx, cli_meta, cli_chunks = index_documents(cli_docs, chunk_size, chunk_overlap)
 
-        # Phase 1: sheet 1
-        df1[['Generated answer','Public chunks','Client chunks']] = ""
-        for i, row in df1.iterrows():
-            if math.isnan(row["#"]):
-                continue
-            prompt = row['Question']
-            example = row['Best practice answer']
+def get_structure_llm_response(prompt, context, company_name, book_year):
+    schema_instruction = """
+    When you answer, return only a JSON array of objects, each matching exactly this schema:
+    [
+      {
+        "risk_type":           "string",
+        "Fraud Risk Factor?":  "Yes"|"No",
+        "Internal Controls":   "string",
+        "Likelihood":          "High"|"Low",
+        "Likelihood Explanation":"string",
+        "Material Quantitative Impact?":"High"|"Low",
+        "Impact Explanation":  "string",
+        "Conclusion":          "string",
+        "SR?":                 "SR"|"No SR"
+      }
+    ]
+    """
 
-            hits_pub = retrieve_chunks(prompt, pub_idx, pub_meta, pub_chunks, top_k)
-            hits_cli = retrieve_chunks(prompt, cli_idx, cli_meta, cli_chunks, top_k)
-            ctx = "PUBLIC CONTEXT:\n" + "\n".join(f"[{s}] {t}" for s,t in hits_pub)
-            ctx += "\n\nCLIENT CONTEXT:\n" + "\n".join(f"[{s}] {t}" for s,t in hits_cli)
-            ctx += "\n\nFORMAT EXAMPLE:\n Q: {prompt}\n A: {example}"
-            ctx += "\nDO NOT RESPOND WITH MARKDOWN"
+    headers = {"Content-Type":"application/json","api-key":LLM_API_KEY}
+    messages=[{"role":"system","content":(
+            "You are an expert audit assistant. "
+            f"Use the provided context to identify *sources of inherent risk*, within the enterprise {company_name} in the year {book_year}"
+            "and fill in each field per item of risk that you identify. Keep each field short, max 5-10 words\n"
+            + schema_instruction +"\n\n"+ context
+            )},
+              {"role":"user","content": f"Use the provided context to identify *sources of inherent risk*, within the enterprise {company_name} in the year {book_year}"
+            "and fill in each field per item of risk that you identify. Keep each field short, max 5-10 words\n"}]
+    r = requests.post(LLM_ENDPOINT, headers=headers, json={"messages":messages})
+    r.raise_for_status()
+    time.sleep(3)
+    return r.json()["choices"][0]["message"]["content"].strip()
 
-            ans = get_llm_response(prompt, ctx)
-            df1.at[i, 'Generated answer'] = ans
 
-            processed += 1
-            pb.progress(processed / total)
-            pt.text(f"Answered {processed} of {total} questions")
+# --- Run pipeline ---
+if st.session_state.pipeline_ran:
+    st.success("✅ Retrieval complete! Download your updated workbooks below.")
+    st.download_button(
+        "Download 1300 workbook",
+        data=st.session_state.out1,
+        file_name="1300_only.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+    st.download_button(
+        "Download Memo workbook",
+        data=st.session_state.out2,
+        file_name="Memo_only.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+    if st.button("Clear Results and Rerun Retrieval"):
+        st.session_state.pipeline_ran = False
+        st.session_state.pop("out1", None)
+        st.session_state.pop("out2", None)
+# 2) Otherwise, show Run button and file inputs
+else:
+    if st.button("Run Retrieval & Generate Answers"):
+        if not excel_path.exists():
+            st.error("Please upload the Input GPT.xlsx file.")
+            st.stop()
+        else:
+            # read bytes again (necessary because we read once above)
+            original_bytes = st.session_state.excel_bytes
+            original_bytes_risks =  st.session_state.risks_excel_bytes
+            df1 = pd.read_excel(BytesIO(original_bytes), sheet_name="1300")
+            df2 = pd.read_excel(BytesIO(original_bytes_risks), sheet_name="Memo")
 
-        # Phase 2: sheet 2
-        for idx, row in df2.iterrows():
-            irf = row['Inherent Risk Factor']
+            # Proceed with pipeline using df1 and df2...
+            # rest of code unchanged, but replace hardcoded sheet references
+
+            # Prepare the second‐sheet columns
+            cols = ['Fraud Risk Factor?','Internal Controls','Likelihood','Likelihood Explanation',
+                    'Material Quantitative Impact?','Impact Explanation','Conclusion','SR?']
+            prompts = {
+                'Fraud Risk Factor?':       "The Fraud Risk Factor of the above risk type. Answer ONLY with Yes or No.",
+                'Internal Controls':        "What are the internal controls within the company against this type of risk. Answer with a maximum of 10 words.",
+                'Likelihood':               "Based on public and previous sources. What is the likelihood of this type of risk occurring. Answer ONLY with High or Low.",
+                'Likelihood Explanation':   "Based on public and previous sources. Only include justification, max 15 words.",
+                'Material Quantitative Impact?': "Based on public and previous sources. Estimated impact of this type of risk. Answer ONLY with High or Low.",
+                'Impact Explanation':       "Based on public and previous sources. Only include justification, max 15 words.",
+                'Conclusion':               "Explain if there is significant risk or if further discussion is needed. Max 10-15 words.",
+                'SR?':                      "Answer only with 'SR' or 'No SR'."
+            }
             for c in cols:
-                base_prompt = f"For the risk type '{irf}', answer: {prompts[c]}"
-                hits_pub = retrieve_chunks(base_prompt, pub_idx, pub_meta, pub_chunks, top_k)
-                hits_cli = retrieve_chunks(base_prompt, cli_idx, cli_meta, cli_chunks, top_k)
+                if c not in df2.columns:
+                    df2[c] = ""
+
+            total = len(df1)
+            pb = st.progress(0.0)
+            pt = st.empty()
+            processed = 0
+
+            pub_docs = {f.name: load_main_body(f) for f in public_files}
+            cli_docs = {f.name: load_main_body(f) for f in client_files}
+            pub_idx, pub_meta, pub_chunks = index_documents(pub_docs, chunk_size, chunk_overlap)
+            cli_idx, cli_meta, cli_chunks = index_documents(cli_docs, chunk_size, chunk_overlap)
+
+            df1[['Generated answer','Public chunks','Client chunks']] = ""
+            for i, row in df1.iterrows():
+                if math.isnan(row["#"]):
+                    continue
+                prompt = row['Question']
+                example = row['Best practice answer']
+
+                hits_pub = retrieve_chunks(prompt, pub_idx, pub_meta, pub_chunks, top_k)
+                hits_cli = retrieve_chunks(prompt, cli_idx, cli_meta, cli_chunks, top_k)
                 ctx = "PUBLIC CONTEXT:\n" + "\n".join(f"[{s}] {t}" for s,t in hits_pub)
                 ctx += "\n\nCLIENT CONTEXT:\n" + "\n".join(f"[{s}] {t}" for s,t in hits_cli)
+                ctx += "\n\nFORMAT EXAMPLE:\n Q: {prompt}\n A: {example}"
                 ctx += "\nDO NOT RESPOND WITH MARKDOWN"
-                tr_ans = get_llm_response(base_prompt, ctx)
-                df2.at[idx, c] = tr_ans
+
+                ans = ""
+                df1.at[i, 'Generated answer'] = ans
+
                 processed += 1
                 pb.progress(processed / total)
                 pt.text(f"Answered {processed} of {total} questions")
 
-        # Write both sheets back into the workbook
-        wb = openpyxl.load_workbook(BytesIO(original_bytes))
+            # Insert company and year
+            df2.iloc[2, 2] = company_name
+            df2.iloc[4, 2] = audit_year
+            prompt =  f"Use the provided context to identify *sources of inherent risk*, within the enterprise {company_name} in the year {audit_year} and fill in each field per item of risk that you identify. Keep each field short, max 5-10 words\n"
+            # hits_pub = retrieve_chunks(prompt, pub_idx, pub_meta, pub_chunks, top_k)
+            # hits_cli = retrieve_chunks(prompt, cli_idx, cli_meta, cli_chunks, top_k)
+            print("c")
+            ctx = "PUBLIC CONTEXT:\n" + "\n".join(f"[{f}]: {pub_docs[f]}" for f in pub_docs.keys())
+            ctx += "\n\nCLIENT CONTEXT:\n" + "\n".join(f"[{f}] {cli_docs[f]}" for f in cli_docs.keys())
+            raw = get_structure_llm_response(prompt, ctx, company_name, audit_year)
+            risks_list = parse_risks_response(raw)
+            
+            start_excel_row = 31
+            # pandas index 0 → Excel row 2 (header is row 1)
+            start_idx = start_excel_row - 2    # 31 → idx 29
 
-        # Sheet1
-        ws1 = wb[wb.sheetnames[0]]
-        for row in ws1.iter_rows(min_row=2, max_row=ws1.max_row, max_col=len(df1.columns)):
-            for cell in row:
-                cell.value = None
-        for r, row_vals in enumerate(df1.values, start=2):
-            for c, val in enumerate(row_vals, start=1):
-                ws1.cell(row=r, column=c).value = val
+            # 2) Ensure df2 is long enough
+            needed = start_idx + len(risks_list)
+            if len(df2) < needed:
+                # append blank rows
+                n_extra = needed - len(df2)
+                blank = pd.DataFrame([ [None]*len(df2.columns) ] * n_extra, columns=df2.columns)
+                df2 = pd.concat([df2, blank], ignore_index=True)
 
-        # Sheet2 (assuming its tab is called 'Overview of risks')
-        ws2 = wb['Overview of risks']
-        for row in ws2.iter_rows(min_row=2, max_row=ws2.max_row, max_col=len(df2.columns)):
-            for cell in row:
-                cell.value = None
-        for r, row_vals in enumerate(df2.values, start=2):
-            for c, val in enumerate(row_vals, start=1):
-                ws2.cell(row=r, column=c).value = val
+            # 3) Map each InherentRisk into df2
+            for i, risk in enumerate(risks_list):
+                row = start_idx + i
+                # 3a) First cell = index
+                df2.iat[row, 0] = i + 1
+                # 3b) Second cell = the risk type itself
+                df2.iat[row, 1] = risk.risk_type
 
-        # Output
-        out = BytesIO()
-        wb.save(out)
-        out.seek(0)
-        st.success("All done!")
-        st.download_button(
-            "Download workbook with answers",
-            data=out,
-            file_name="questions_with_translations.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
+                # 3c) The remaining eight fields, by name
+                field_map = {
+                    'Fraud Risk Factor?':            risk.Fraud_Risk_Factor,
+                    'Internal Controls':             risk.Internal_Controls,
+                    'Likelihood':                    risk.Likelihood,
+                    'Likelihood Explanation':        risk.Likelihood_Explanation,
+                    'Material Quantitative Impact?': risk.Material_Quantitative_Impact,
+                    'Impact Explanation':            risk.Impact_Explanation,
+                    'Conclusion':                    risk.Conclusion,
+                    'SR?':                           risk.SR,
+                }
+                for i, key in enumerate(field_map.keys()):
+                    df2.iat[row, i+2] = field_map[key]
+
+            
+            
+            wb1 = load_workbook(BytesIO(st.session_state.excel_bytes))
+            ws1 = wb1["1300"]
+
+            # Clear old data-values (keep styles & merges)
+            for row in ws1.iter_rows(min_row=2, max_row=ws1.max_row, max_col=len(df1.columns)):
+                for cell in row:
+                    try:
+                        cell.value = None
+                    except AttributeError:
+                        # skip MergedCell or read-only
+                        pass
+
+            # Write new df1 values, skipping merged-cell write errors
+            for r, row_vals in enumerate(df1.values, start=2):
+                for c, val in enumerate(row_vals,   start=1):
+                    try:
+                        ws1.cell(row=r, column=c).value = val
+                    except AttributeError:
+                        pass
+
+            out1 = BytesIO()
+            wb1.save(out1)
+            out1.seek(0)
+
+            # 2) Workbook 2 – preserve formatting in “Memo” sheet
+            wb2 = load_workbook(BytesIO(st.session_state.risks_excel_bytes))
+            ws2 = wb2["Memo"]
+
+            for row in ws2.iter_rows(min_row=2, max_row=ws2.max_row, max_col=len(df2.columns)):
+                for cell in row:
+                    try:
+                        cell.value = None
+                    except AttributeError:
+                        pass
+
+            for r, row_vals in enumerate(df2.values, start=2):
+                for c, val in enumerate(row_vals,   start=1):
+                    try:
+                        ws2.cell(row=r, column=c).value = val
+                    except AttributeError:
+                        pass
+
+            out2 = BytesIO()
+            wb2.save(out2)
+            out2.seek(0)
+
+
+            st.session_state.out1 = out1
+            st.session_state.out2 = out2
+            st.session_state.pipeline_ran = True
+
+            st.success("All done!")
+            st.download_button(
+                "Download 1300 workbook",
+                data=out1,
+                file_name="1300_only.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+            st.download_button(
+                "Download Memo workbook",
+                data=out2,
+                file_name="Memo_only.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
