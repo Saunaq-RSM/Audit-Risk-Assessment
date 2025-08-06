@@ -185,18 +185,43 @@ def retrieve_chunks(query: str, index, meta, chunks, k: int):
     D,I = index.search(np.array([q_emb]), k)
     return [(meta[i][0], chunks[i]) for i in I[0]]
 
-def get_llm_response(prompt: str, context: str) -> str:
-    headers = {"Content-Type":"application/json","api-key":LLM_API_KEY}
-    messages=[{"role":"system","content":(
-                "Please respond in natural, flowing English paragraphs. Do not use any markdown syntax. "
-                "You are a world-class corporate analysis assistant for an expert audit team. "
-                "Use the context to answer due diligence questions.\n" + context
-            )},
-              {"role":"user","content":prompt}]
-    r = requests.post(LLM_ENDPOINT, headers=headers, json={"messages":messages})
+def get_llm_response(prompt: str, context: str) -> tuple[str, str]:
+    headers = {
+        "Content-Type": "application/json",
+        "api-key": LLM_API_KEY
+    }
+
+    system_message = (
+        "You are a world-class corporate analysis assistant for an expert audit team. "
+        "Use the context below to answer due diligence questions. Use the internet to answer any questions you aren't aware of the answers to. \n\n"
+        f"Context:\n{context}\n\n"
+        "Respond in natural, flowing English paragraphs. Do not use any markdown syntax. "
+        "Cite your sources in square brackets like [1], [2], etc. at the relevant point in the response. "
+        "At the end, include a list of the sources used, each on a new line, prefixed with the corresponding number. Be very specific about the part of the website, and the subpage used to take the info from. Don't just list the main page of the webpage."
+        "Example: [1] https://example.com/example_sub_directory"
+    )
+
+    messages = [
+        {"role": "system", "content": system_message},
+        {"role": "user", "content": prompt}
+    ]
+
+    r = requests.post(LLM_ENDPOINT, headers=headers, json={"messages": messages})
     r.raise_for_status()
     time.sleep(3)
-    return r.json()["choices"][0]["message"]["content"].strip()
+
+    response_text = r.json()["choices"][0]["message"]["content"].strip()
+
+    # Separate main response and sources using a heuristic
+    if "\n[1]" in response_text:
+        split_index = response_text.find("\n[1]")
+        main_answer = response_text[:split_index].strip()
+        sources = response_text[split_index:].strip()
+    else:
+        main_answer = response_text
+        sources = ""
+
+    return main_answer, sources
 
 def parse_risks_response(raw: str) -> List[InherentRisk]:
     """
@@ -333,7 +358,7 @@ else:
             pub_idx, pub_meta, pub_chunks = index_documents(pub_docs, chunk_size, chunk_overlap)
             cli_idx, cli_meta, cli_chunks = index_documents(cli_docs, chunk_size, chunk_overlap)
 
-            df1[['Generated answer','Public chunks','Client chunks']] = ""
+            df1[['Generated answer','Sources']] = ""
             for i, row in df1.iterrows():
                 if math.isnan(row["#"]):
                     continue
@@ -347,9 +372,9 @@ else:
                 ctx += "\n\nFORMAT EXAMPLE:\n Q: {prompt}\n A: {example}"
                 ctx += "\nDO NOT RESPOND WITH MARKDOWN"
 
-                ans = get_llm_response(prompt, ctx)
+                ans, sources = get_llm_response(prompt, ctx)
                 df1.at[i, 'Generated answer'] = ans
-
+                df1.at[i, 'Sources'] = sources
                 processed += 1
                 pb.progress(processed / total)
                 pt.text(f"Answered {processed} of {total} questions")
