@@ -457,12 +457,12 @@ else:
             st.download_button(
                 "Download 1300 workbook",
                 data=out1,
-                file_name="1300_only.xlsx",
+                file_name="1300.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
             st.download_button(
-                "Download Memo workbook",
+                "Download Overview of risks workbook",
                 data=out2,
-                file_name="Memo_only.xlsx",
+                file_name="Overview_of_risks.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
