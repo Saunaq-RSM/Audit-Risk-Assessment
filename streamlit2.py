@@ -40,7 +40,7 @@ class InherentRisk(BaseModel):
     Likelihood: str = Field(
         ..., 
         pattern="^(High|Low)$",
-        description="One of High, Medium, or Low"
+        description="One of High, or Low"
     )
 
     Likelihood_Explanation: str
@@ -223,10 +223,27 @@ def get_llm_response(prompt: str, context: str) -> tuple[str, str]:
 
     return main_answer, sources
 
+def _coerce_high_low(value: str | None) -> str:
+    if not value:
+        return "Low"
+    value = value.strip().lower()
+    if "high" in value:
+        return "High"
+    return "Low"
+
+def _coerce_yes_no(value: str | None) -> str:
+    if not value:
+        return "No"
+    value = value.strip().lower()
+    if "yes" in value:
+        return "Yes"
+    return "No"
+
+
 def parse_risks_response(raw: str) -> List[InherentRisk]:
     """
     Given the LLM's JSON string, returns a list of validated InherentRisk objects.
-    Raises ValueError on malformed JSON or schema violations.
+    Skips or coerces invalid items instead of crashing the app.
     """
     fence_pattern = re.compile(r"^```(?:json)?\s*(.*)\s*```$", re.DOTALL)
     m = fence_pattern.match(raw.strip())
@@ -243,25 +260,23 @@ def parse_risks_response(raw: str) -> List[InherentRisk]:
 
     risks: List[InherentRisk] = []
     for idx, item in enumerate(data):
-        # rename keys to be Pydantic-friendly
         mapped = {
-            "risk_type":                  item.get("risk_type"),
-            "Fraud_Risk_Factor":          item.get("Fraud Risk Factor?"),
-            "Internal_Controls":          item.get("Internal Controls"),
-            "Likelihood":                 item.get("Likelihood"),
-            "Likelihood_Explanation":     item.get("Likelihood Explanation"),
-            "Material_Quantitative_Impact":item.get("Material Quantitative Impact?"),
-            "Impact_Explanation":         item.get("Impact Explanation"),
-            "Conclusion":                 item.get("Conclusion"),
-            "SR":                         item.get("SR?"),
+            "risk_type":                   item.get("risk_type"),
+            "Fraud_Risk_Factor":           _coerce_yes_no(item.get("Fraud Risk Factor?")),
+            "Internal_Controls":           item.get("Internal Controls", "Not provided"),
+            "Likelihood":                  _coerce_high_low(item.get("Likelihood")),
+            "Likelihood_Explanation":      item.get("Likelihood Explanation", "Not provided"),
+            "Material_Quantitative_Impact":_coerce_high_low(item.get("Material Quantitative Impact?")),
+            "Impact_Explanation":          item.get("Impact Explanation", "Not provided"),
+            "Conclusion":                  item.get("Conclusion", "Not provided"),
+            "SR":                          "No SR"  # Will be overwritten in the validator
         }
         try:
             risks.append(InherentRisk(**mapped))
         except ValidationError as ve:
-            raise ValueError(f"Item {idx} failed validation:\n{ve}")
+            print(f"Warning: Item {idx} failed validation and was skipped:\n{ve}\nRaw: {item}")
 
     return risks
-
 
 def get_structure_llm_response(prompt, context, company_name, book_year):
     schema_instruction = """
